@@ -28,6 +28,7 @@ coverage
 .next/
 out/
 dist
+target/
 
 
 # Debug
