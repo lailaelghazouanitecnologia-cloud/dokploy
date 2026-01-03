@@ -2,13 +2,16 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::config::GroqConfig;
-use crate::error::{AppError, Result};
+use crate::error::{GroqError, ValidationError, Result};
+use crate::validation::validate_not_empty;
 
 const GROQ_API_BASE: &str = "https://api.groq.com/openai/v1";
 const TIMEOUT_SECONDS: u64 = 120;
 const MAX_TOKENS_DEFAULT: u32 = 4096;
 const TEMPERATURE_DEFAULT: f32 = 0.7;
 const PROMPT_LENGTH_MAX: usize = 128_000;
+
+const VALID_ROLES: &[&str] = &["system", "user", "assistant"];
 
 pub struct GroqProvider {
     client:   Client,
@@ -65,7 +68,9 @@ impl GroqProvider {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(TIMEOUT_SECONDS))
             .build()
-            .map_err(|e| AppError::Groq(format!("failed to create client: {e}")))?;
+            .map_err(|e| GroqError::RequestFailed {
+                reason: format!("failed to create client: {e}"),
+            })?;
 
         Ok(Self {
             client,
@@ -76,7 +81,7 @@ impl GroqProvider {
 
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
         if request.messages.is_empty() {
-            return Err(AppError::Validation("messages cannot be empty".into()));
+            return Err(ValidationError::Empty { field: "messages" }.into());
         }
 
         let total_length: usize = request.messages
@@ -85,22 +90,21 @@ impl GroqProvider {
             .sum();
 
         if total_length > PROMPT_LENGTH_MAX {
-            return Err(AppError::Validation(format!(
-                "total prompt length exceeds {PROMPT_LENGTH_MAX}"
-            )));
+            return Err(GroqError::PromptTooLarge {
+                length: total_length,
+                limit:  PROMPT_LENGTH_MAX,
+            }.into());
         }
 
         for msg in &request.messages {
             if msg.role.is_empty() {
-                return Err(AppError::Validation("message role cannot be empty".into()));
+                return Err(ValidationError::Empty { field: "role" }.into());
             }
 
-            let valid_roles = ["system", "user", "assistant"];
-            if !valid_roles.contains(&msg.role.as_str()) {
-                return Err(AppError::Validation(format!(
-                    "invalid role: {}",
-                    msg.role
-                )));
+            if !VALID_ROLES.contains(&msg.role.as_str()) {
+                return Err(GroqError::InvalidRole {
+                    role: msg.role.clone(),
+                }.into());
             }
         }
 
@@ -121,30 +125,35 @@ impl GroqProvider {
             .json(&api_request)
             .send()
             .await
-            .map_err(|e| AppError::Groq(format!("request failed: {e}")))?;
+            .map_err(|e| GroqError::RequestFailed {
+                reason: e.to_string(),
+            })?;
 
         if !response.status().is_success() {
-            let status = response.status();
+            let status = response.status().as_u16();
             let body = response.text().await.unwrap_or_default();
-            return Err(AppError::Groq(format!("api error {status}: {body}")));
+            return Err(GroqError::ApiError {
+                status,
+                message: body,
+            }.into());
         }
 
         let chat_response = response
             .json::<ChatResponse>()
             .await
-            .map_err(|e| AppError::Groq(format!("parse failed: {e}")))?;
+            .map_err(|e| GroqError::RequestFailed {
+                reason: format!("parse failed: {e}"),
+            })?;
 
         if chat_response.choices.is_empty() {
-            return Err(AppError::Groq("no choices in response".into()));
+            return Err(GroqError::EmptyResponse.into());
         }
 
         Ok(chat_response)
     }
 
     pub async fn complete(&self, prompt: &str) -> Result<String> {
-        if prompt.is_empty() {
-            return Err(AppError::Validation("prompt cannot be empty".into()));
-        }
+        validate_not_empty(prompt, "prompt")?;
 
         let request = ChatRequest {
             messages: vec![ChatMessage {
@@ -167,9 +176,7 @@ impl GroqProvider {
     }
 
     pub async fn analyze_code(&self, code: &str, language: &str) -> Result<String> {
-        if code.is_empty() {
-            return Err(AppError::Validation("code cannot be empty".into()));
-        }
+        validate_not_empty(code, "code")?;
 
         let system_prompt = format!(
             "You are a code analyzer. Analyze the following {language} code and provide:\n\
@@ -207,9 +214,7 @@ impl GroqProvider {
     }
 
     pub async fn generate_commit_message(&self, diff: &str) -> Result<String> {
-        if diff.is_empty() {
-            return Err(AppError::Validation("diff cannot be empty".into()));
-        }
+        validate_not_empty(diff, "diff")?;
 
         let system_prompt = "You are a git commit message generator. \
             Generate a concise, conventional commit message for the given diff. \
@@ -244,9 +249,7 @@ impl GroqProvider {
     }
 
     pub async fn explain_error(&self, error: &str, context: Option<&str>) -> Result<String> {
-        if error.is_empty() {
-            return Err(AppError::Validation("error cannot be empty".into()));
-        }
+        validate_not_empty(error, "error")?;
 
         let system_prompt = "You are a debugging assistant. \
             Explain the given error message in simple terms and suggest potential fixes. \

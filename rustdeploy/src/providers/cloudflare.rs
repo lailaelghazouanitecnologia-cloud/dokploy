@@ -2,10 +2,13 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::config::CloudflareConfig;
-use crate::error::{AppError, Result};
+use crate::error::{CloudflareError, Result};
+use crate::validation::validate_not_empty;
 
 const CLOUDFLARE_API_BASE: &str = "https://api.cloudflare.com/client/v4";
 const TIMEOUT_SECONDS: u64 = 30;
+
+const VALID_RECORD_TYPES: &[&str] = &["A", "AAAA", "CNAME", "TXT", "MX", "NS"];
 
 pub struct CloudflareProvider {
     client:  Client,
@@ -56,7 +59,10 @@ impl CloudflareProvider {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(TIMEOUT_SECONDS))
             .build()
-            .map_err(|e| AppError::Cloudflare(format!("failed to create client: {e}")))?;
+            .map_err(|e| CloudflareError::RequestFailed {
+                operation: "create_client",
+                reason: e.to_string(),
+            })?;
 
         Ok(Self {
             client,
@@ -72,7 +78,7 @@ impl CloudflareProvider {
         );
 
         if let Some(name) = name_filter {
-            url.push_str(&format!("?name={name}"));
+            url.push_str(&format!("?name={}", urlencoding::encode(name)));
         }
 
         let response = self.client
@@ -81,12 +87,18 @@ impl CloudflareProvider {
             .header("Content-Type", "application/json")
             .send()
             .await
-            .map_err(|e| AppError::Cloudflare(format!("request failed: {e}")))?;
+            .map_err(|e| CloudflareError::RequestFailed {
+                operation: "list_dns_records",
+                reason: e.to_string(),
+            })?;
 
         if !response.status().is_success() {
-            let status = response.status();
+            let status = response.status().as_u16();
             let body = response.text().await.unwrap_or_default();
-            return Err(AppError::Cloudflare(format!("api error {status}: {body}")));
+            return Err(CloudflareError::ApiError {
+                code: status as u32,
+                message: body,
+            }.into());
         }
 
         #[derive(Deserialize)]
@@ -103,7 +115,10 @@ impl CloudflareProvider {
         let list: ListResult<DnsRecordRaw> = response
             .json()
             .await
-            .map_err(|e| AppError::Cloudflare(format!("parse failed: {e}")))?;
+            .map_err(|e| CloudflareError::RequestFailed {
+                operation: "parse_response",
+                reason: e.to_string(),
+            })?;
 
         let records = list.result
             .into_iter()
@@ -121,20 +136,13 @@ impl CloudflareProvider {
     }
 
     pub async fn create_dns_record(&self, record: CreateDnsRecord) -> Result<DnsRecord> {
-        if record.name.is_empty() {
-            return Err(AppError::Validation("name cannot be empty".into()));
-        }
+        validate_not_empty(&record.name, "name")?;
+        validate_not_empty(&record.content, "content")?;
 
-        if record.content.is_empty() {
-            return Err(AppError::Validation("content cannot be empty".into()));
-        }
-
-        let valid_types = ["A", "AAAA", "CNAME", "TXT", "MX", "NS"];
-        if !valid_types.contains(&record.type_.as_str()) {
-            return Err(AppError::Validation(format!(
-                "invalid record type: {}",
-                record.type_
-            )));
+        if !VALID_RECORD_TYPES.contains(&record.type_.as_str()) {
+            return Err(CloudflareError::InvalidRecordType {
+                type_: record.type_.clone(),
+            }.into());
         }
 
         let url = format!(
@@ -149,12 +157,18 @@ impl CloudflareProvider {
             .json(&record)
             .send()
             .await
-            .map_err(|e| AppError::Cloudflare(format!("request failed: {e}")))?;
+            .map_err(|e| CloudflareError::RequestFailed {
+                operation: "create_dns_record",
+                reason: e.to_string(),
+            })?;
 
         if !response.status().is_success() {
-            let status = response.status();
+            let status = response.status().as_u16();
             let body = response.text().await.unwrap_or_default();
-            return Err(AppError::Cloudflare(format!("api error {status}: {body}")));
+            return Err(CloudflareError::ApiError {
+                code: status as u32,
+                message: body,
+            }.into());
         }
 
         #[derive(Deserialize)]
@@ -171,18 +185,24 @@ impl CloudflareProvider {
         let resp: ApiResponse<DnsRecordRaw> = response
             .json()
             .await
-            .map_err(|e| AppError::Cloudflare(format!("parse failed: {e}")))?;
+            .map_err(|e| CloudflareError::RequestFailed {
+                operation: "parse_response",
+                reason: e.to_string(),
+            })?;
 
         if !resp.success {
-            let msg = resp.errors
-                .first()
-                .map(|e| e.message.clone())
-                .unwrap_or_else(|| "unknown error".into());
-            return Err(AppError::Cloudflare(msg));
+            let error = resp.errors.first();
+            return Err(CloudflareError::ApiError {
+                code: error.map(|e| e.code).unwrap_or(0),
+                message: error.map(|e| e.message.clone()).unwrap_or_else(|| "unknown".into()),
+            }.into());
         }
 
         let raw = resp.result.ok_or_else(|| {
-            AppError::Cloudflare("no result in response".into())
+            CloudflareError::RequestFailed {
+                operation: "create_dns_record",
+                reason: "no result in response".into(),
+            }
         })?;
 
         Ok(DnsRecord {
@@ -200,17 +220,13 @@ impl CloudflareProvider {
         record_id: &str,
         record: CreateDnsRecord,
     ) -> Result<DnsRecord> {
-        if record_id.is_empty() {
-            return Err(AppError::Validation("record_id cannot be empty".into()));
-        }
-
-        if record.name.is_empty() {
-            return Err(AppError::Validation("name cannot be empty".into()));
-        }
+        validate_not_empty(record_id, "record_id")?;
+        validate_not_empty(&record.name, "name")?;
 
         let url = format!(
-            "{CLOUDFLARE_API_BASE}/zones/{}/dns_records/{record_id}",
-            self.zone_id
+            "{CLOUDFLARE_API_BASE}/zones/{}/dns_records/{}",
+            self.zone_id,
+            urlencoding::encode(record_id)
         );
 
         let response = self.client
@@ -220,12 +236,18 @@ impl CloudflareProvider {
             .json(&record)
             .send()
             .await
-            .map_err(|e| AppError::Cloudflare(format!("request failed: {e}")))?;
+            .map_err(|e| CloudflareError::RequestFailed {
+                operation: "update_dns_record",
+                reason: e.to_string(),
+            })?;
 
         if !response.status().is_success() {
-            let status = response.status();
+            let status = response.status().as_u16();
             let body = response.text().await.unwrap_or_default();
-            return Err(AppError::Cloudflare(format!("api error {status}: {body}")));
+            return Err(CloudflareError::ApiError {
+                code: status as u32,
+                message: body,
+            }.into());
         }
 
         #[derive(Deserialize)]
@@ -242,18 +264,24 @@ impl CloudflareProvider {
         let resp: ApiResponse<DnsRecordRaw> = response
             .json()
             .await
-            .map_err(|e| AppError::Cloudflare(format!("parse failed: {e}")))?;
+            .map_err(|e| CloudflareError::RequestFailed {
+                operation: "parse_response",
+                reason: e.to_string(),
+            })?;
 
         if !resp.success {
-            let msg = resp.errors
-                .first()
-                .map(|e| e.message.clone())
-                .unwrap_or_else(|| "unknown error".into());
-            return Err(AppError::Cloudflare(msg));
+            let error = resp.errors.first();
+            return Err(CloudflareError::ApiError {
+                code: error.map(|e| e.code).unwrap_or(0),
+                message: error.map(|e| e.message.clone()).unwrap_or_else(|| "unknown".into()),
+            }.into());
         }
 
         let raw = resp.result.ok_or_else(|| {
-            AppError::Cloudflare("no result in response".into())
+            CloudflareError::RequestFailed {
+                operation: "update_dns_record",
+                reason: "no result in response".into(),
+            }
         })?;
 
         Ok(DnsRecord {
@@ -267,13 +295,12 @@ impl CloudflareProvider {
     }
 
     pub async fn delete_dns_record(&self, record_id: &str) -> Result<()> {
-        if record_id.is_empty() {
-            return Err(AppError::Validation("record_id cannot be empty".into()));
-        }
+        validate_not_empty(record_id, "record_id")?;
 
         let url = format!(
-            "{CLOUDFLARE_API_BASE}/zones/{}/dns_records/{record_id}",
-            self.zone_id
+            "{CLOUDFLARE_API_BASE}/zones/{}/dns_records/{}",
+            self.zone_id,
+            urlencoding::encode(record_id)
         );
 
         let response = self.client
@@ -281,12 +308,18 @@ impl CloudflareProvider {
             .header("Authorization", format!("Bearer {}", self.token))
             .send()
             .await
-            .map_err(|e| AppError::Cloudflare(format!("request failed: {e}")))?;
+            .map_err(|e| CloudflareError::RequestFailed {
+                operation: "delete_dns_record",
+                reason: e.to_string(),
+            })?;
 
         if !response.status().is_success() {
-            let status = response.status();
+            let status = response.status().as_u16();
             let body = response.text().await.unwrap_or_default();
-            return Err(AppError::Cloudflare(format!("api error {status}: {body}")));
+            return Err(CloudflareError::ApiError {
+                code: status as u32,
+                message: body,
+            }.into());
         }
 
         Ok(())
@@ -318,12 +351,18 @@ impl CloudflareProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| AppError::Cloudflare(format!("request failed: {e}")))?;
+            .map_err(|e| CloudflareError::RequestFailed {
+                operation: "purge_cache",
+                reason: e.to_string(),
+            })?;
 
         if !response.status().is_success() {
-            let status = response.status();
+            let status = response.status().as_u16();
             let body = response.text().await.unwrap_or_default();
-            return Err(AppError::Cloudflare(format!("purge failed {status}: {body}")));
+            return Err(CloudflareError::ApiError {
+                code: status as u32,
+                message: body,
+            }.into());
         }
 
         Ok(())

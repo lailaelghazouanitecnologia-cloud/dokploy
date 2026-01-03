@@ -3,7 +3,8 @@ use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
 
 use crate::config::EmailConfig;
-use crate::error::{AppError, Result};
+use crate::error::{EmailError, Result};
+use crate::validation::{validate_email, validate_not_empty, validate_max_length};
 
 const SUBJECT_LENGTH_MAX: usize = 998;
 const BODY_LENGTH_MAX: usize = 10 * 1024 * 1024;
@@ -11,6 +12,8 @@ const BODY_LENGTH_MAX: usize = 10 * 1024 * 1024;
 pub struct EmailProvider {
     transport:    AsyncSmtpTransport<Tokio1Executor>,
     from_address: Mailbox,
+    smtp_host:    String,
+    smtp_port:    u16,
 }
 
 #[derive(Debug, Clone)]
@@ -38,49 +41,47 @@ impl EmailProvider {
         );
 
         let transport = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.smtp_host)
-            .map_err(|e| AppError::Email(format!("smtp config failed: {e}")))?
+            .map_err(|e| EmailError::ConnectionFailed {
+                host:   config.smtp_host.clone(),
+                port:   config.smtp_port,
+                reason: e.to_string(),
+            })?
             .port(config.smtp_port)
             .credentials(credentials)
             .build();
 
         let from_address: Mailbox = config.from_address
             .parse()
-            .map_err(|e| AppError::Email(format!("invalid from address: {e}")))?;
+            .map_err(|_| EmailError::InvalidAddress {
+                address: config.from_address.clone(),
+            })?;
 
         Ok(Self {
             transport,
             from_address,
+            smtp_host: config.smtp_host.clone(),
+            smtp_port: config.smtp_port,
         })
     }
 
     pub async fn send(&self, message: EmailMessage) -> Result<()> {
-        if message.to.is_empty() {
-            return Err(AppError::Validation("recipient cannot be empty".into()));
-        }
-
-        if !message.to.contains('@') {
-            return Err(AppError::Validation("invalid recipient address".into()));
-        }
-
-        if message.subject.is_empty() {
-            return Err(AppError::Validation("subject cannot be empty".into()));
-        }
-
-        if message.subject.len() > SUBJECT_LENGTH_MAX {
-            return Err(AppError::Validation(format!(
-                "subject exceeds max length of {SUBJECT_LENGTH_MAX}"
-            )));
-        }
+        validate_not_empty(&message.to, "recipient")?;
+        validate_email(&message.to)?;
+        validate_not_empty(&message.subject, "subject")?;
+        validate_max_length(&message.subject, SUBJECT_LENGTH_MAX, "subject")?;
 
         if message.body.len() > BODY_LENGTH_MAX {
-            return Err(AppError::Validation(format!(
-                "body exceeds max length of {BODY_LENGTH_MAX}"
-            )));
+            return Err(EmailError::MessageTooLarge {
+                size_bytes:  message.body.len(),
+                limit_bytes: BODY_LENGTH_MAX,
+            }.into());
         }
 
         let to_mailbox: Mailbox = message.to
             .parse()
-            .map_err(|e| AppError::Email(format!("invalid to address: {e}")))?;
+            .map_err(|_| EmailError::InvalidAddress {
+                address: message.to.clone(),
+            })?;
 
         let content_type = if message.html {
             ContentType::TEXT_HTML
@@ -90,16 +91,22 @@ impl EmailProvider {
 
         let email = Message::builder()
             .from(self.from_address.clone())
-            .to(to_mailbox)
+            .to(to_mailbox.clone())
             .subject(message.subject)
             .header(content_type)
             .body(message.body)
-            .map_err(|e| AppError::Email(format!("message build failed: {e}")))?;
+            .map_err(|e| EmailError::SendFailed {
+                to:     message.to.clone(),
+                reason: e.to_string(),
+            })?;
 
         self.transport
             .send(email)
             .await
-            .map_err(|e| AppError::Email(format!("send failed: {e}")))?;
+            .map_err(|e| EmailError::SendFailed {
+                to:     to_mailbox.to_string(),
+                reason: e.to_string(),
+            })?;
 
         Ok(())
     }
@@ -112,11 +119,11 @@ impl EmailProvider {
         details: &str,
     ) -> Result<()> {
         let (subject_prefix, color) = match notification_type {
-            NotificationType::DeploymentStarted   => ("🚀 Deployment Started", "#3498db"),
-            NotificationType::DeploymentSucceeded => ("✅ Deployment Succeeded", "#27ae60"),
-            NotificationType::DeploymentFailed    => ("❌ Deployment Failed", "#e74c3c"),
-            NotificationType::SecurityAlert       => ("🔒 Security Alert", "#e67e22"),
-            NotificationType::SystemNotification  => ("ℹ️ System Notification", "#9b59b6"),
+            NotificationType::DeploymentStarted   => ("Deployment Started", "#3498db"),
+            NotificationType::DeploymentSucceeded => ("Deployment Succeeded", "#27ae60"),
+            NotificationType::DeploymentFailed    => ("Deployment Failed", "#e74c3c"),
+            NotificationType::SecurityAlert       => ("Security Alert", "#e67e22"),
+            NotificationType::SystemNotification  => ("System Notification", "#9b59b6"),
         };
 
         let subject = format!("{subject_prefix}: {title}");

@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::deployment::{Deployment, DeploymentConfig, DeploymentState};
-use crate::error::AppError;
 
 use super::state::AppState;
 
@@ -159,16 +158,14 @@ pub async fn cancel_deployment(
     let mut queue = state.queue.write().await;
 
     if let Err(e) = queue.cancel(id) {
-        let status = match e {
-            AppError::NotFound(_) => StatusCode::NOT_FOUND,
-            _ => StatusCode::BAD_REQUEST,
-        };
+        let status_code = e.status_code();
+        let status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
         return (
             status,
             Json(ErrorResponse {
                 error: e.to_string(),
-                code:  status.as_u16(),
+                code:  status_code,
             }),
         ).into_response();
     }
@@ -276,16 +273,14 @@ pub async fn get_repository(
     let repository = match state.github.get_repository(&owner, &repo).await {
         Ok(r) => r,
         Err(e) => {
-            let status = match e {
-                AppError::NotFound(_) => StatusCode::NOT_FOUND,
-                _ => StatusCode::BAD_GATEWAY,
-            };
+            let status_code = e.status_code();
+            let status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
             return (
                 status,
                 Json(ErrorResponse {
                     error: e.to_string(),
-                    code:  status.as_u16(),
+                    code:  status_code,
                 }),
             ).into_response();
         }
