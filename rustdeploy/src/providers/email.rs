@@ -9,6 +9,7 @@ use crate::validation::{validate_email, validate_not_empty, validate_max_length}
 const SUBJECT_LENGTH_MAX: usize = 998;
 const BODY_LENGTH_MAX: usize = 10 * 1024 * 1024;
 
+#[allow(dead_code)]
 pub struct EmailProvider {
     transport:    AsyncSmtpTransport<Tokio1Executor>,
     from_address: Mailbox,

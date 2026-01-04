@@ -3,7 +3,7 @@ use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use rustdeploy::api::{create_router, AppState};
+use rustdeploy::api::{create_router, AppState, RateLimitState};
 use rustdeploy::config::Config;
 
 #[tokio::main]
@@ -25,8 +25,10 @@ async fn main() -> anyhow::Result<()> {
     info!("Initializing application state...");
 
     let state = AppState::new(config).await?;
+    let rate_limiter = RateLimitState::new();
 
-    let router = create_router(state);
+    let router = create_router(state, rate_limiter)
+        .into_make_service_with_connect_info::<SocketAddr>();
 
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
 

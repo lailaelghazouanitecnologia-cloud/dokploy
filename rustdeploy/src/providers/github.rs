@@ -57,6 +57,7 @@ pub struct CommitAuthor {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct WebhookPayload {
     pub event_type: WebhookEvent,
     pub repository: String,

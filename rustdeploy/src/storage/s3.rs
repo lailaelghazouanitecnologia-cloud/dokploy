@@ -62,7 +62,7 @@ impl S3Storage {
             .bucket(&self.bucket)
             .send()
             .await
-            .map_err(|e| StorageError::BucketNotAccessible {
+            .map_err(|_| StorageError::BucketNotAccessible {
                 bucket: self.bucket.clone(),
             })?;
 
@@ -356,5 +356,18 @@ impl S3Storage {
         }
 
         Ok(result)
+    }
+
+    pub async fn health_check(&self) -> Result<()> {
+        self.client
+            .head_bucket()
+            .bucket(&self.bucket)
+            .send()
+            .await
+            .map_err(|_| StorageError::BucketNotAccessible {
+                bucket: self.bucket.clone(),
+            })?;
+
+        Ok(())
     }
 }

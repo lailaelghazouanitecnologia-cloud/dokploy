@@ -78,14 +78,14 @@ impl std::fmt::Debug for S3Config {
 #[derive(Clone)]
 pub struct GitHubConfig {
     pub token:          String,
-    pub webhook_secret: String,
+    pub webhook_secret: Option<String>,
 }
 
 impl std::fmt::Debug for GitHubConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GitHubConfig")
             .field("token", &"[REDACTED]")
-            .field("webhook_secret", &"[REDACTED]")
+            .field("webhook_secret", &self.webhook_secret.as_ref().map(|_| "[REDACTED]"))
             .finish()
     }
 }
@@ -160,7 +160,7 @@ impl Config {
             },
             github: GitHubConfig {
                 token:          get_env("GITHUB_TOKEN")?,
-                webhook_secret: get_env("GITHUB_WEBHOOK_SECRET")?,
+                webhook_secret: get_env_optional("GITHUB_WEBHOOK_SECRET"),
             },
             cloudflare: CloudflareConfig {
                 api_token: get_env("CLOUDFLARE_API_TOKEN")?,
@@ -214,11 +214,13 @@ impl Config {
             }.into());
         }
 
-        if self.github.webhook_secret.len() < KEY_LENGTH_MIN {
-            return Err(ConfigError::InvalidValue {
-                var:    "GITHUB_WEBHOOK_SECRET",
-                reason: format!("must be >= {KEY_LENGTH_MIN} chars"),
-            }.into());
+        if let Some(ref secret) = self.github.webhook_secret {
+            if secret.len() < KEY_LENGTH_MIN {
+                return Err(ConfigError::InvalidValue {
+                    var:    "GITHUB_WEBHOOK_SECRET",
+                    reason: format!("must be >= {KEY_LENGTH_MIN} chars"),
+                }.into());
+            }
         }
 
         if self.cloudflare.api_token.len() < KEY_LENGTH_MIN {

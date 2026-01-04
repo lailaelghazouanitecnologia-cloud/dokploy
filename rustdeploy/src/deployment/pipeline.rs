@@ -82,6 +82,7 @@ impl DeploymentState {
         }
     }
 
+    #[allow(dead_code)]
     fn timeout_seconds(&self) -> u64 {
         match self {
             Self::Cloning => CLONE_TIMEOUT_SECONDS,
@@ -204,6 +205,7 @@ impl Deployment {
         self.log(LogLevel::Info, message);
     }
 
+    #[allow(dead_code)]
     fn log_warn(&mut self, message: impl Into<String>) {
         self.log(LogLevel::Warn, message);
     }
